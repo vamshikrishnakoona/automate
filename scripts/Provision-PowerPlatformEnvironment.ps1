@@ -24,7 +24,10 @@ param(
     [string]$LanguageName,
 
     [Parameter(Mandatory = $true)]
-    [string]$EnvironmentGroupName
+    [string]$EnvironmentGroupName,
+
+    [Parameter(Mandatory = $true)]
+    [string]$SecurityGroupId
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,63 +78,6 @@ function Get-AccessToken {
         -ContentType "application/x-www-form-urlencoded"
 
     return $response.access_token
-}
-
-# ------------------------------------------------------------
-# Helper: Create or get Entra security group
-# ------------------------------------------------------------
-
-function New-OrGet-EntraSecurityGroup {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$GroupDisplayName
-    )
-
-    Write-Host "Creating or retrieving Entra security group: $GroupDisplayName"
-
-    $graphToken = Get-AccessToken -Resource "https://graph.microsoft.com"
-
-    $headers = @{
-        Authorization  = "Bearer $graphToken"
-        "Content-Type" = "application/json"
-    }
-
-    $mailNickname = ($GroupDisplayName -replace '[^a-zA-Z0-9]', '').ToLower()
-
-    if (:IsNullOrWhiteSpace($mailNickname)) {
-        $mailNickname = "ppenvgroup"
-    }
-
-    $filter = "displayName eq '$GroupDisplayName'"
-    $encodedFilter = [System.Net.WebUtility]::UrlEncode($filter)
-
-    $existing = Invoke-RestMethod `
-        -Method Get `
-        -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=$encodedFilter" `
-        -Headers $headers
-
-    if ($existing.value.Count -gt 0) {
-        Write-Host "Security group already exists."
-        Write-Host "Security group ID: $($existing.value[0].id)"
-        return $existing.value[0].id
-    }
-
-    $body = @{
-        displayName     = $GroupDisplayName
-        mailEnabled     = $false
-        mailNickname    = $mailNickname
-        securityEnabled = $true
-    } | ConvertTo-Json -Depth 10
-
-    $created = Invoke-RestMethod `
-        -Method Post `
-        -Uri "https://graph.microsoft.com/v1.0/groups" `
-        -Headers $headers `
-        -Body $body
-
-    Write-Host "Created security group with ID: $($created.id)"
-
-    return $created.id
 }
 
 # ------------------------------------------------------------
@@ -220,23 +166,29 @@ function New-EnvironmentDlpPolicy {
 
     $businessGroup = [pscustomobject]@{
         classification = "Confidential"
-        connectors     = @($businessConnectors | ForEach-Object {
-            Get-ConnectorObject -ConnectorName $_
-        })
+        connectors     = @(
+            $businessConnectors | ForEach-Object {
+                Get-ConnectorObject -ConnectorName $_
+            }
+        )
     }
 
     $nonBusinessGroup = [pscustomobject]@{
         classification = "General"
-        connectors     = @($nonBusinessConnectors | ForEach-Object {
-            Get-ConnectorObject -ConnectorName $_
-        })
+        connectors     = @(
+            $nonBusinessConnectors | ForEach-Object {
+                Get-ConnectorObject -ConnectorName $_
+            }
+        )
     }
 
     $blockedGroup = [pscustomobject]@{
         classification = "Blocked"
-        connectors     = @($blockedConnectors | ForEach-Object {
-            Get-ConnectorObject -ConnectorName $_
-        })
+        connectors     = @(
+            $blockedConnectors | ForEach-Object {
+                Get-ConnectorObject -ConnectorName $_
+            }
+        )
     }
 
     $environmentReference = [pscustomobject]@{
@@ -265,12 +217,12 @@ function New-EnvironmentDlpPolicy {
     if ($null -ne $existingPolicies.value) {
         $existingPolicy = $existingPolicies.value | Where-Object {
             $_.displayName -eq $PolicyDisplayName
-        }
+        } | Select-Object -First 1
     }
     else {
         $existingPolicy = $existingPolicies | Where-Object {
             $_.displayName -eq $PolicyDisplayName
-        }
+        } | Select-Object -First 1
     }
 
     if ($null -ne $existingPolicy) {
@@ -327,7 +279,7 @@ function New-OrGet-EnvironmentGroup {
     if ($null -ne $groups.value) {
         $existing = $groups.value | Where-Object {
             $_.displayName -eq $GroupDisplayName
-        }
+        } | Select-Object -First 1
     }
 
     if ($null -ne $existing) {
@@ -400,6 +352,16 @@ function Add-EnvironmentToEnvironmentGroup {
 }
 
 # ------------------------------------------------------------
+# Validate existing security group ID
+# ------------------------------------------------------------
+
+Write-Host "Using existing security group ID: $SecurityGroupId"
+
+if (:IsNullOrWhiteSpace($SecurityGroupId)) {
+    throw "SecurityGroupId is empty. Please provide an existing Entra security group ID."
+}
+
+# ------------------------------------------------------------
 # Authenticate to Power Platform
 # ------------------------------------------------------------
 
@@ -412,19 +374,6 @@ Add-PowerAppsAccount `
     -ClientSecret $ClientSecret | Out-Null
 
 Write-Host "Authenticated."
-
-# ------------------------------------------------------------
-# Create or retrieve security group
-# ------------------------------------------------------------
-
-$securityGroupDisplayName = "SG-PP-$EnvironmentDisplayName"
-
-$securityGroupId = New-OrGet-EntraSecurityGroup `
-    -GroupDisplayName $securityGroupDisplayName
-
-if (:IsNullOrWhiteSpace($securityGroupId)) {
-    throw "Security group ID is empty. Cannot continue."
-}
 
 # ------------------------------------------------------------
 # Create or retrieve Power Platform environment
@@ -452,7 +401,7 @@ else {
         -ProvisionDatabase `
         -CurrencyName $CurrencyName `
         -LanguageName $LanguageName `
-        -SecurityGroupId $securityGroupId `
+        -SecurityGroupId $SecurityGroupId `
         -WaitUntilFinished $true `
         -TimeoutInMinutes 120
 
@@ -509,8 +458,7 @@ Add-EnvironmentToEnvironmentGroup `
 Write-Host "Power Platform automation completed successfully."
 Write-Host "Environment Display Name: $EnvironmentDisplayName"
 Write-Host "Environment ID: $environmentId"
-Write-Host "Security Group Name: $securityGroupDisplayName"
-Write-Host "Security Group ID: $securityGroupId"
+Write-Host "Security Group ID: $SecurityGroupId"
 Write-Host "DLP Policy Name: $dlpPolicyName"
 Write-Host "Environment Group Name: $EnvironmentGroupName"
 Write-Host "Environment Group ID: $environmentGroupId"
