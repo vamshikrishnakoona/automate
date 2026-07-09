@@ -1,63 +1,46 @@
-name: Power Platform Environment Automation
+name: Power Platform Environment Provisioning
 
 on:
   workflow_dispatch:
     inputs:
-      environmentName:
-        description: "Power Platform Environment Name"
-        required: true
-        type: string
+      environmentFilter:
+        description: 'Optional: only provision the environment with this "name" from environments.json (leave blank for all)'
+        required: false
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - 'config/environments.json'
+      - 'scripts/**'
+      - '.github/workflows/power-platform-environment-provision.yml'
 
-      locationName:
-        description: "Location"
-        required: true
-        default: "india"
-        type: string
-
-      environmentSku:
-        description: "Environment Type"
-        required: true
-        default: "Sandbox"
-        type: choice
-        options:
-          - Production
-          - Sandbox
-
-      environmentGroupName:
-        description: "Environment Group Name"
-        required: true
-        default: "Managed-Environments"
-        type: string
-
-      securityGroupId:
-        description: "Existing Security Group Object ID"
-        required: true
-        type: string
+permissions:
+  contents: read
 
 jobs:
-  create-environment:
-    runs-on: windows-latest
+  provision:
+    runs-on: windows-latest # Microsoft.PowerApps.Administration.PowerShell installs cleanly here; ubuntu-latest + pwsh also works
+    environment: production # optional: gate this behind a GitHub Environment with required reviewers
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Execute Power Platform Provisioning Script
+      - name: Install Power Platform PowerShell module
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name Microsoft.PowerApps.Administration.PowerShell -Scope CurrentUser -Force -AllowClobber
+
+      - name: Run provisioning pipeline
         shell: pwsh
         env:
           PP_TENANT_ID: ${{ secrets.PP_TENANT_ID }}
-          PP_CLIENT_ID: ${{ secrets.PP_CLIENT_ID }}
+          PP_APPLICATION_ID: ${{ secrets.PP_APPLICATION_ID }}
           PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
-
         run: |
-          ./scripts/Provision-PowerPlatformEnvironment.ps1 `
+          ./scripts/Deploy-PowerPlatformEnvironment.ps1 `
             -TenantId $env:PP_TENANT_ID `
-            -ClientId $env:PP_CLIENT_ID `
+            -ApplicationId $env:PP_APPLICATION_ID `
             -ClientSecret $env:PP_CLIENT_SECRET `
-            -EnvironmentDisplayName "${{ inputs.environmentName }}" `
-            -LocationName "${{ inputs.locationName }}" `
-            -EnvironmentSku "${{ inputs.environmentSku }}" `
-            -CurrencyName "INR" `
-            -LanguageName "English" `
-            -EnvironmentGroupName "${{ inputs.environmentGroupName }}" `
-            -SecurityGroupId "${{ inputs.securityGroupId }}"
+            -EnvironmentFilter '${{ github.event.inputs.environmentFilter }}'
