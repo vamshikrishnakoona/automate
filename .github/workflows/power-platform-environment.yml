@@ -17,7 +17,7 @@ on:
       environmentSku:
         description: "Environment Type"
         required: true
-        default: "Production"
+        default: "Sandbox"
         type: choice
         options:
           - Production
@@ -27,6 +27,11 @@ on:
         description: "Environment Group Name"
         required: true
         default: "Managed-Environments"
+        type: string
+
+      securityGroupId:
+        description: "Existing Security Group Object ID"
+        required: true
         type: string
 
 jobs:
@@ -54,4 +59,5 @@ jobs:
             -EnvironmentSku "${{ inputs.environmentSku }}" `
             -CurrencyName "INR" `
             -LanguageName "English" `
-            -EnvironmentGroupName "${{ inputs.environmentGroupName }}"
+            -EnvironmentGroupName "${{ inputs.environmentGroupName }}" `
+            -SecurityGroupId "${{ inputs.securityGroupId }}"
