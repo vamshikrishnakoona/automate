@@ -31,12 +31,15 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "Installing required PowerShell modules..."
 
-Install-Module Microsoft.PowerApps.Administration.PowerShell -Scope CurrentUser -Force -AllowClobber
-Install-Module Microsoft.PowerApps.PowerShell -Scope CurrentUser -Force -AllowClobber
+Set-PSRepository PSGallery -InstallationPolicy Trusted
 
-Import-Module Microsoft.PowerApps.Administration.PowerShell
-Import-Module Microsoft.PowerApps.PowerShell
-
+Install-Module Microsoft.PowerApps.Administration.PowerShell `
+  -Scope CurrentUser `
+  -Force `
+  -AllowClobber `
+  -SkipPublisherCheck
+Get-Module Microsoft.PowerApps* | Remove-Module -Force -ErrorAction SilentlyContinue
+Import-Module Microsoft.PowerApps.Administration.PowerShell -Force
 function Get-AccessToken {
     param(
         [Parameter(Mandatory = $true)]
