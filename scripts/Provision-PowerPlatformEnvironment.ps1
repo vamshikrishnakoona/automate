@@ -381,15 +381,30 @@ Write-Host "Authenticated."
 
 Write-Host "Checking if environment already exists: $EnvironmentDisplayName"
 
+$environmentId = $null
+
 $existingEnvironments = Get-AdminPowerAppEnvironment
 
 $existingEnvironment = $existingEnvironments | Where-Object {
-    $_.DisplayName -eq $EnvironmentDisplayName
+    $_.DisplayName -eq $EnvironmentDisplayName -or
+    $_.Internal.properties.displayName -eq $EnvironmentDisplayName
 } | Select-Object -First 1
 
 if ($null -ne $existingEnvironment) {
     Write-Host "Environment already exists."
-    $environmentId = $existingEnvironment.EnvironmentName
+
+    if (-not [System.String]::IsNullOrWhiteSpace($existingEnvironment.EnvironmentName)) {
+        $environmentId = $existingEnvironment.EnvironmentName
+    }
+    elseif (-not [System.String]::IsNullOrWhiteSpace($existingEnvironment.EnvironmentId)) {
+        $environmentId = $existingEnvironment.EnvironmentId
+    }
+    elseif (-not [System.String]::IsNullOrWhiteSpace($existingEnvironment.Name)) {
+        $environmentId = $existingEnvironment.Name
+    }
+    elseif ($null -ne $existingEnvironment.Internal -and -not [System.String]::IsNullOrWhiteSpace($existingEnvironment.Internal.name)) {
+        $environmentId = $existingEnvironment.Internal.name
+    }
 }
 else {
     Write-Host "Creating Power Platform environment: $EnvironmentDisplayName"
@@ -405,11 +420,53 @@ else {
         -WaitUntilFinished $true `
         -TimeoutInMinutes 120
 
-    $environmentId = $environment.EnvironmentName
+    Write-Host "Environment creation command completed."
+    Write-Host "Raw environment creation response:"
+    $environment | ConvertTo-Json -Depth 20 | Write-Host
+
+    if (-not [System.String]::IsNullOrWhiteSpace($environment.EnvironmentName)) {
+        $environmentId = $environment.EnvironmentName
+    }
+    elseif (-not [System.String]::IsNullOrWhiteSpace($environment.EnvironmentId)) {
+        $environmentId = $environment.EnvironmentId
+    }
+    elseif (-not [System.String]::IsNullOrWhiteSpace($environment.Name)) {
+        $environmentId = $environment.Name
+    }
+    elseif ($null -ne $environment.Internal -and -not [System.String]::IsNullOrWhiteSpace($environment.Internal.name)) {
+        $environmentId = $environment.Internal.name
+    }
+
+    if ([System.String]::IsNullOrWhiteSpace($environmentId)) {
+        Write-Host "Environment ID was not returned directly."
+        Write-Host "Waiting 60 seconds and searching by environment display name..."
+
+        Start-Sleep -Seconds 60
+
+        $createdEnvironment = Get-AdminPowerAppEnvironment | Where-Object {
+            $_.DisplayName -eq $EnvironmentDisplayName -or
+            $_.Internal.properties.displayName -eq $EnvironmentDisplayName
+        } | Select-Object -First 1
+
+        if ($null -ne $createdEnvironment) {
+            if (-not [System.String]::IsNullOrWhiteSpace($createdEnvironment.EnvironmentName)) {
+                $environmentId = $createdEnvironment.EnvironmentName
+            }
+            elseif (-not [System.String]::IsNullOrWhiteSpace($createdEnvironment.EnvironmentId)) {
+                $environmentId = $createdEnvironment.EnvironmentId
+            }
+            elseif (-not [System.String]::IsNullOrWhiteSpace($createdEnvironment.Name)) {
+                $environmentId = $createdEnvironment.Name
+            }
+            elseif ($null -ne $createdEnvironment.Internal -and -not [System.String]::IsNullOrWhiteSpace($createdEnvironment.Internal.name)) {
+                $environmentId = $createdEnvironment.Internal.name
+            }
+        }
+    }
 }
 
 if ([System.String]::IsNullOrWhiteSpace($environmentId)) {
-    throw "Environment creation failed. EnvironmentName is empty."
+    throw "Environment creation failed or environment ID could not be found after creation. Check Power Platform Admin Center to confirm whether the environment was created."
 }
 
 Write-Host "Environment ID: $environmentId"
