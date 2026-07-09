@@ -352,6 +352,105 @@ function Add-EnvironmentToEnvironmentGroup {
 }
 
 # ------------------------------------------------------------
+# Helper: Extract environment ID from Power Platform object
+# ------------------------------------------------------------
+
+function Get-EnvironmentIdFromObject {
+    param(
+        [Parameter(Mandatory = $false)]
+        [object]$EnvironmentObject
+    )
+
+    if ($null -eq $EnvironmentObject) {
+        return $null
+    }
+
+    $candidateValues = @(
+        $EnvironmentObject.EnvironmentName,
+        $EnvironmentObject.EnvironmentId,
+        $EnvironmentObject.Name,
+        $EnvironmentObject.name,
+        $EnvironmentObject.Internal.name,
+        $EnvironmentObject.Internal.properties.environmentId,
+        $EnvironmentObject.Internal.properties.name
+    )
+
+    foreach ($value in $candidateValues) {
+        if (-not [System.String]::IsNullOrWhiteSpace($value)) {
+            $environmentIdValue = [string]$value
+
+            if ($environmentIdValue -like "*/environments/*") {
+                $environmentIdValue = ($environmentIdValue -split "/environments/")[-1]
+            }
+
+            if ($environmentIdValue -like "*/*") {
+                $environmentIdValue = ($environmentIdValue -split "/")[-1]
+            }
+
+            return $environmentIdValue
+        }
+    }
+
+    return $null
+}
+
+# ------------------------------------------------------------
+# Helper: Extract environment display name from object
+# ------------------------------------------------------------
+
+function Get-EnvironmentDisplayNameFromObject {
+    param(
+        [Parameter(Mandatory = $false)]
+        [object]$EnvironmentObject
+    )
+
+    if ($null -eq $EnvironmentObject) {
+        return $null
+    }
+
+    $candidateValues = @(
+        $EnvironmentObject.DisplayName,
+        $EnvironmentObject.displayName,
+        $EnvironmentObject.Internal.properties.displayName,
+        $EnvironmentObject.Internal.properties.linkedEnvironmentMetadata.friendlyName,
+        $EnvironmentObject.Properties.displayName
+    )
+
+    foreach ($value in $candidateValues) {
+        if (-not [System.String]::IsNullOrWhiteSpace($value)) {
+            return [string]$value
+        }
+    }
+
+    return $null
+}
+
+# ------------------------------------------------------------
+# Helper: Find environment by display name
+# ------------------------------------------------------------
+
+function Find-EnvironmentByDisplayName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DisplayName
+    )
+
+    Write-Host "Searching for environment by display name: $DisplayName"
+
+    $allEnvironments = Get-AdminPowerAppEnvironment
+
+    foreach ($envItem in $allEnvironments) {
+        $currentDisplayName = Get-EnvironmentDisplayNameFromObject -EnvironmentObject $envItem
+
+        if ($currentDisplayName -eq $DisplayName) {
+            return $envItem
+        }
+    }
+
+    return $null
+}
+
+# ------------------------------------------------------------
 # Validate existing security group ID
 # ------------------------------------------------------------
 
@@ -383,28 +482,12 @@ Write-Host "Checking if environment already exists: $EnvironmentDisplayName"
 
 $environmentId = $null
 
-$existingEnvironments = Get-AdminPowerAppEnvironment
-
-$existingEnvironment = $existingEnvironments | Where-Object {
-    $_.DisplayName -eq $EnvironmentDisplayName -or
-    $_.Internal.properties.displayName -eq $EnvironmentDisplayName
-} | Select-Object -First 1
+$existingEnvironment = Find-EnvironmentByDisplayName -DisplayName $EnvironmentDisplayName
 
 if ($null -ne $existingEnvironment) {
     Write-Host "Environment already exists."
 
-    if (-not [System.String]::IsNullOrWhiteSpace($existingEnvironment.EnvironmentName)) {
-        $environmentId = $existingEnvironment.EnvironmentName
-    }
-    elseif (-not [System.String]::IsNullOrWhiteSpace($existingEnvironment.EnvironmentId)) {
-        $environmentId = $existingEnvironment.EnvironmentId
-    }
-    elseif (-not [System.String]::IsNullOrWhiteSpace($existingEnvironment.Name)) {
-        $environmentId = $existingEnvironment.Name
-    }
-    elseif ($null -ne $existingEnvironment.Internal -and -not [System.String]::IsNullOrWhiteSpace($existingEnvironment.Internal.name)) {
-        $environmentId = $existingEnvironment.Internal.name
-    }
+    $environmentId = Get-EnvironmentIdFromObject -EnvironmentObject $existingEnvironment
 }
 else {
     Write-Host "Creating Power Platform environment: $EnvironmentDisplayName"
@@ -422,51 +505,47 @@ else {
 
     Write-Host "Environment creation command completed."
     Write-Host "Raw environment creation response:"
-    $environment | ConvertTo-Json -Depth 20 | Write-Host
+    $environment | ConvertTo-Json -Depth 30 | Write-Host
 
-    if (-not [System.String]::IsNullOrWhiteSpace($environment.EnvironmentName)) {
-        $environmentId = $environment.EnvironmentName
-    }
-    elseif (-not [System.String]::IsNullOrWhiteSpace($environment.EnvironmentId)) {
-        $environmentId = $environment.EnvironmentId
-    }
-    elseif (-not [System.String]::IsNullOrWhiteSpace($environment.Name)) {
-        $environmentId = $environment.Name
-    }
-    elseif ($null -ne $environment.Internal -and -not [System.String]::IsNullOrWhiteSpace($environment.Internal.name)) {
-        $environmentId = $environment.Internal.name
-    }
+    $environmentId = Get-EnvironmentIdFromObject -EnvironmentObject $environment
 
     if ([System.String]::IsNullOrWhiteSpace($environmentId)) {
         Write-Host "Environment ID was not returned directly."
-        Write-Host "Waiting 60 seconds and searching by environment display name..."
+        Write-Host "Polling Power Platform Admin Center for environment creation status..."
 
-        Start-Sleep -Seconds 60
+        for ($attempt = 1; $attempt -le 30; $attempt++) {
+            Write-Host "Environment lookup attempt $attempt of 30..."
 
-        $createdEnvironment = Get-AdminPowerAppEnvironment | Where-Object {
-            $_.DisplayName -eq $EnvironmentDisplayName -or
-            $_.Internal.properties.displayName -eq $EnvironmentDisplayName
-        } | Select-Object -First 1
+            Start-Sleep -Seconds 60
 
-        if ($null -ne $createdEnvironment) {
-            if (-not [System.String]::IsNullOrWhiteSpace($createdEnvironment.EnvironmentName)) {
-                $environmentId = $createdEnvironment.EnvironmentName
-            }
-            elseif (-not [System.String]::IsNullOrWhiteSpace($createdEnvironment.EnvironmentId)) {
-                $environmentId = $createdEnvironment.EnvironmentId
-            }
-            elseif (-not [System.String]::IsNullOrWhiteSpace($createdEnvironment.Name)) {
-                $environmentId = $createdEnvironment.Name
-            }
-            elseif ($null -ne $createdEnvironment.Internal -and -not [System.String]::IsNullOrWhiteSpace($createdEnvironment.Internal.name)) {
-                $environmentId = $createdEnvironment.Internal.name
+            $createdEnvironment = Find-EnvironmentByDisplayName -DisplayName $EnvironmentDisplayName
+
+            if ($null -ne $createdEnvironment) {
+                $environmentId = Get-EnvironmentIdFromObject -EnvironmentObject $createdEnvironment
+
+                if (-not [System.String]::IsNullOrWhiteSpace($environmentId)) {
+                    Write-Host "Environment found after creation."
+                    break
+                }
             }
         }
     }
 }
 
 if ([System.String]::IsNullOrWhiteSpace($environmentId)) {
-    throw "Environment creation failed or environment ID could not be found after creation. Check Power Platform Admin Center to confirm whether the environment was created."
+    Write-Host "Could not find environment ID."
+    Write-Host "Listing environments visible to the service principal for troubleshooting..."
+
+    $debugEnvironments = Get-AdminPowerAppEnvironment
+
+    foreach ($debugEnv in $debugEnvironments) {
+        $debugDisplayName = Get-EnvironmentDisplayNameFromObject -EnvironmentObject $debugEnv
+        $debugEnvironmentId = Get-EnvironmentIdFromObject -EnvironmentObject $debugEnv
+
+        Write-Host "Visible Environment - DisplayName: $debugDisplayName | EnvironmentId: $debugEnvironmentId"
+    }
+
+    throw "Environment creation failed or environment ID could not be found after creation. Check whether the environment was created and whether the service principal can list it."
 }
 
 Write-Host "Environment ID: $environmentId"
