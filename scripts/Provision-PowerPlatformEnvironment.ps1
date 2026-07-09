@@ -357,8 +357,8 @@ function Add-EnvironmentToEnvironmentGroup {
 
 Write-Host "Using existing security group ID: $SecurityGroupId"
 
-if (:IsNullOrWhiteSpace($SecurityGroupId)) {
-    throw "SecurityGroupId is empty. Please provide an existing Entra security group ID."
+if ([System.String]::IsNullOrWhiteSpace($SecurityGroupId)) {
+    throw "SecurityGroupId is empty. Please provide an existing Entra security group Object ID."
 }
 
 # ------------------------------------------------------------
@@ -408,7 +408,7 @@ else {
     $environmentId = $environment.EnvironmentName
 }
 
-if (:IsNullOrWhiteSpace($environmentId)) {
+if ([System.String]::IsNullOrWhiteSpace($environmentId)) {
     throw "Environment creation failed. EnvironmentName is empty."
 }
 
@@ -439,7 +439,7 @@ New-EnvironmentDlpPolicy `
 $environmentGroupId = New-OrGet-EnvironmentGroup `
     -GroupDisplayName $EnvironmentGroupName
 
-if (:IsNullOrWhiteSpace($environmentGroupId)) {
+if ([System.String]::IsNullOrWhiteSpace($environmentGroupId)) {
     throw "Environment Group ID is empty. Cannot continue."
 }
 
