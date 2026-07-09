@@ -29,17 +29,30 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+Write-Host "Starting Power Platform environment automation..."
+
+# ------------------------------------------------------------
+# Install and import required Power Platform module
+# ------------------------------------------------------------
+
 Write-Host "Installing required PowerShell modules..."
 
-Set-PSRepository PSGallery -InstallationPolicy Trusted
+Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
+
+Get-Module Microsoft.PowerApps* | Remove-Module -Force -ErrorAction SilentlyContinue
 
 Install-Module Microsoft.PowerApps.Administration.PowerShell `
-  -Scope CurrentUser `
-  -Force `
-  -AllowClobber `
-  -SkipPublisherCheck
-Get-Module Microsoft.PowerApps* | Remove-Module -Force -ErrorAction SilentlyContinue
+    -Scope CurrentUser `
+    -Force `
+    -AllowClobber `
+    -SkipPublisherCheck
+
 Import-Module Microsoft.PowerApps.Administration.PowerShell -Force
+
+# ------------------------------------------------------------
+# Helper: Get access token
+# ------------------------------------------------------------
+
 function Get-AccessToken {
     param(
         [Parameter(Mandatory = $true)]
@@ -55,9 +68,18 @@ function Get-AccessToken {
         grant_type    = "client_credentials"
     }
 
-    $response = Invoke-RestMethod -Method Post -Uri $tokenUri -Body $body -ContentType "application/x-www-form-urlencoded"
+    $response = Invoke-RestMethod `
+        -Method Post `
+        -Uri $tokenUri `
+        -Body $body `
+        -ContentType "application/x-www-form-urlencoded"
+
     return $response.access_token
 }
+
+# ------------------------------------------------------------
+# Helper: Create or get Entra security group
+# ------------------------------------------------------------
 
 function New-OrGet-EntraSecurityGroup {
     param(
@@ -68,17 +90,21 @@ function New-OrGet-EntraSecurityGroup {
     Write-Host "Creating or retrieving Entra security group: $GroupDisplayName"
 
     $graphToken = Get-AccessToken -Resource "https://graph.microsoft.com"
+
     $headers = @{
-        Authorization = "Bearer $graphToken"
+        Authorization  = "Bearer $graphToken"
         "Content-Type" = "application/json"
     }
 
     $mailNickname = ($GroupDisplayName -replace '[^a-zA-Z0-9]', '').ToLower()
+
     if (:IsNullOrWhiteSpace($mailNickname)) {
         $mailNickname = "ppenvgroup"
     }
 
-    $encodedFilter = [System.Web.HttpUtility]::UrlEncode("displayName eq '$GroupDisplayName'")
+    $filter = "displayName eq '$GroupDisplayName'"
+    $encodedFilter = [System.Net.WebUtility]::UrlEncode($filter)
+
     $existing = Invoke-RestMethod `
         -Method Get `
         -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=$encodedFilter" `
@@ -86,6 +112,7 @@ function New-OrGet-EntraSecurityGroup {
 
     if ($existing.value.Count -gt 0) {
         Write-Host "Security group already exists."
+        Write-Host "Security group ID: $($existing.value[0].id)"
         return $existing.value[0].id
     }
 
@@ -103,8 +130,13 @@ function New-OrGet-EntraSecurityGroup {
         -Body $body
 
     Write-Host "Created security group with ID: $($created.id)"
+
     return $created.id
 }
+
+# ------------------------------------------------------------
+# Helper: Enable Managed Environment
+# ------------------------------------------------------------
 
 function Enable-ManagedEnvironment {
     param(
@@ -128,6 +160,10 @@ function Enable-ManagedEnvironment {
     Write-Host "Managed Environment enabled."
 }
 
+# ------------------------------------------------------------
+# Helper: Connector object for DLP policy
+# ------------------------------------------------------------
+
 function Get-ConnectorObject {
     param(
         [Parameter(Mandatory = $true)]
@@ -141,6 +177,10 @@ function Get-ConnectorObject {
     }
 }
 
+# ------------------------------------------------------------
+# Helper: Create or update environment-specific DLP policy
+# ------------------------------------------------------------
+
 function New-EnvironmentDlpPolicy {
     param(
         [Parameter(Mandatory = $true)]
@@ -150,9 +190,9 @@ function New-EnvironmentDlpPolicy {
         [string]$PolicyDisplayName
     )
 
-    Write-Host "Creating DLP policy: $PolicyDisplayName"
+    Write-Host "Creating or updating DLP policy: $PolicyDisplayName"
 
-    # Business = Confidential in Power Platform DLP API
+    # Business connectors = Confidential in DLP API
     $businessConnectors = @(
         "shared_sharepointonline",
         "shared_office365",
@@ -161,12 +201,13 @@ function New-EnvironmentDlpPolicy {
         "shared_teams"
     )
 
-    # Non-Business = General in Power Platform DLP API
+    # Non-Business connectors = General in DLP API
     $nonBusinessConnectors = @(
         "shared_msnweather",
         "shared_bingmaps"
     )
 
+    # Blocked connectors
     $blockedConnectors = @(
         "shared_twitter",
         "shared_facebook",
@@ -179,17 +220,23 @@ function New-EnvironmentDlpPolicy {
 
     $businessGroup = [pscustomobject]@{
         classification = "Confidential"
-        connectors     = @($businessConnectors | ForEach-Object { Get-ConnectorObject -ConnectorName $_ })
+        connectors     = @($businessConnectors | ForEach-Object {
+            Get-ConnectorObject -ConnectorName $_
+        })
     }
 
     $nonBusinessGroup = [pscustomobject]@{
         classification = "General"
-        connectors     = @($nonBusinessConnectors | ForEach-Object { Get-ConnectorObject -ConnectorName $_ })
+        connectors     = @($nonBusinessConnectors | ForEach-Object {
+            Get-ConnectorObject -ConnectorName $_
+        })
     }
 
     $blockedGroup = [pscustomobject]@{
         classification = "Blocked"
-        connectors     = @($blockedConnectors | ForEach-Object { Get-ConnectorObject -ConnectorName $_ })
+        connectors     = @($blockedConnectors | ForEach-Object {
+            Get-ConnectorObject -ConnectorName $_
+        })
     }
 
     $environmentReference = [pscustomobject]@{
@@ -212,19 +259,46 @@ function New-EnvironmentDlpPolicy {
     }
 
     $existingPolicies = Get-DlpPolicy
-    $existingPolicy = $existingPolicies.value | Where-Object { $_.displayName -eq $PolicyDisplayName }
+
+    $existingPolicy = $null
+
+    if ($null -ne $existingPolicies.value) {
+        $existingPolicy = $existingPolicies.value | Where-Object {
+            $_.displayName -eq $PolicyDisplayName
+        }
+    }
+    else {
+        $existingPolicy = $existingPolicies | Where-Object {
+            $_.displayName -eq $PolicyDisplayName
+        }
+    }
 
     if ($null -ne $existingPolicy) {
         Write-Host "DLP policy already exists. Updating existing policy."
-        $newPolicy.name = $existingPolicy.name
-        Set-DlpPolicy -PolicyName $existingPolicy.name -UpdatedPolicy $newPolicy | Out-Null
+
+        $newPolicy | Add-Member `
+            -MemberType NoteProperty `
+            -Name name `
+            -Value $existingPolicy.name `
+            -Force
+
+        Set-DlpPolicy `
+            -PolicyName $existingPolicy.name `
+            -UpdatedPolicy $newPolicy | Out-Null
     }
     else {
-        New-DlpPolicy -NewPolicy $newPolicy | Out-Null
+        Write-Host "DLP policy does not exist. Creating new policy."
+
+        New-DlpPolicy `
+            -NewPolicy $newPolicy | Out-Null
     }
 
-    Write-Host "DLP policy created or updated."
+    Write-Host "DLP policy created or updated successfully."
 }
+
+# ------------------------------------------------------------
+# Helper: Create or get Environment Group
+# ------------------------------------------------------------
 
 function New-OrGet-EnvironmentGroup {
     param(
@@ -235,15 +309,26 @@ function New-OrGet-EnvironmentGroup {
     Write-Host "Creating or retrieving Environment Group: $GroupDisplayName"
 
     $token = Get-AccessToken -Resource "https://api.powerplatform.com"
+
     $headers = @{
-        Authorization = "Bearer $token"
+        Authorization  = "Bearer $token"
         "Content-Type" = "application/json"
     }
 
     $groupsUri = "https://api.powerplatform.com/environmentmanagement/environmentGroups?api-version=2024-10-01"
 
-    $groups = Invoke-RestMethod -Method Get -Uri $groupsUri -Headers $headers
-    $existing = $groups.value | Where-Object { $_.displayName -eq $GroupDisplayName }
+    $groups = Invoke-RestMethod `
+        -Method Get `
+        -Uri $groupsUri `
+        -Headers $headers
+
+    $existing = $null
+
+    if ($null -ne $groups.value) {
+        $existing = $groups.value | Where-Object {
+            $_.displayName -eq $GroupDisplayName
+        }
+    }
 
     if ($null -ne $existing) {
         Write-Host "Environment Group already exists with ID: $($existing.id)"
@@ -252,14 +337,23 @@ function New-OrGet-EnvironmentGroup {
 
     $body = @{
         displayName = $GroupDisplayName
-        description = "Created by GitHub Actions automation"
+        description = "Created by GitHub Actions Power Platform automation"
     } | ConvertTo-Json -Depth 10
 
-    $created = Invoke-RestMethod -Method Post -Uri $groupsUri -Headers $headers -Body $body
+    $created = Invoke-RestMethod `
+        -Method Post `
+        -Uri $groupsUri `
+        -Headers $headers `
+        -Body $body
 
     Write-Host "Created Environment Group with ID: $($created.id)"
+
     return $created.id
 }
+
+# ------------------------------------------------------------
+# Helper: Add environment to Environment Group
+# ------------------------------------------------------------
 
 function Add-EnvironmentToEnvironmentGroup {
     param(
@@ -273,26 +367,41 @@ function Add-EnvironmentToEnvironmentGroup {
     Write-Host "Adding environment $EnvironmentId to Environment Group $GroupId"
 
     $token = Get-AccessToken -Resource "https://api.powerplatform.com"
+
     $headers = @{
-        Authorization = "Bearer $token"
+        Authorization  = "Bearer $token"
         "Content-Type" = "application/json"
     }
 
     $uri = "https://api.powerplatform.com/environmentmanagement/environmentGroups/$GroupId/addEnvironment/$EnvironmentId`?api-version=2024-10-01"
 
     try {
-        Invoke-RestMethod -Method Post -Uri $uri -Headers $headers | Out-Null
-        Write-Host "Environment added to group."
+        Invoke-RestMethod `
+            -Method Post `
+            -Uri $uri `
+            -Headers $headers | Out-Null
+
+        Write-Host "Environment added to Environment Group."
     }
     catch {
-        if ($_.Exception.Response.StatusCode.value__ -eq 204) {
-            Write-Host "Environment is already associated or no content returned."
+        $statusCode = $null
+
+        if ($_.Exception.Response -ne $null) {
+            $statusCode = $_.Exception.Response.StatusCode.value__
+        }
+
+        if ($statusCode -eq 204 -or $statusCode -eq 409) {
+            Write-Host "Environment is already added to the Environment Group."
         }
         else {
             throw
         }
     }
 }
+
+# ------------------------------------------------------------
+# Authenticate to Power Platform
+# ------------------------------------------------------------
 
 Write-Host "Authenticating to Power Platform using service principal..."
 
@@ -304,46 +413,104 @@ Add-PowerAppsAccount `
 
 Write-Host "Authenticated."
 
+# ------------------------------------------------------------
+# Create or retrieve security group
+# ------------------------------------------------------------
+
 $securityGroupDisplayName = "SG-PP-$EnvironmentDisplayName"
-$securityGroupId = New-OrGet-EntraSecurityGroup -GroupDisplayName $securityGroupDisplayName
 
-Write-Host "Creating Power Platform environment: $EnvironmentDisplayName"
+$securityGroupId = New-OrGet-EntraSecurityGroup `
+    -GroupDisplayName $securityGroupDisplayName
 
-$environment = New-AdminPowerAppEnvironment `
-    -DisplayName $EnvironmentDisplayName `
-    -LocationName $LocationName `
-    -EnvironmentSku $EnvironmentSku `
-    -ProvisionDatabase `
-    -CurrencyName $CurrencyName `
-    -LanguageName $LanguageName `
-    -SecurityGroupId $securityGroupId `
-    -WaitUntilFinished $true `
-    -TimeoutInMinutes 120
+if (:IsNullOrWhiteSpace($securityGroupId)) {
+    throw "Security group ID is empty. Cannot continue."
+}
 
-$environmentId = $environment.EnvironmentName
+# ------------------------------------------------------------
+# Create or retrieve Power Platform environment
+# ------------------------------------------------------------
+
+Write-Host "Checking if environment already exists: $EnvironmentDisplayName"
+
+$existingEnvironments = Get-AdminPowerAppEnvironment
+
+$existingEnvironment = $existingEnvironments | Where-Object {
+    $_.DisplayName -eq $EnvironmentDisplayName
+} | Select-Object -First 1
+
+if ($null -ne $existingEnvironment) {
+    Write-Host "Environment already exists."
+    $environmentId = $existingEnvironment.EnvironmentName
+}
+else {
+    Write-Host "Creating Power Platform environment: $EnvironmentDisplayName"
+
+    $environment = New-AdminPowerAppEnvironment `
+        -DisplayName $EnvironmentDisplayName `
+        -LocationName $LocationName `
+        -EnvironmentSku $EnvironmentSku `
+        -ProvisionDatabase `
+        -CurrencyName $CurrencyName `
+        -LanguageName $LanguageName `
+        -SecurityGroupId $securityGroupId `
+        -WaitUntilFinished $true `
+        -TimeoutInMinutes 120
+
+    $environmentId = $environment.EnvironmentName
+}
 
 if (:IsNullOrWhiteSpace($environmentId)) {
     throw "Environment creation failed. EnvironmentName is empty."
 }
 
-Write-Host "Environment created: $environmentId"
+Write-Host "Environment ID: $environmentId"
 
-Enable-ManagedEnvironment -EnvironmentId $environmentId
+# ------------------------------------------------------------
+# Enable managed environment
+# ------------------------------------------------------------
 
-$dlpPolicyName = "DLP-$EnvironmentDisplayName"
+Enable-ManagedEnvironment `
+    -EnvironmentId $environmentId
+
+# ------------------------------------------------------------
+# Create environment-specific DLP policy
+# ------------------------------------------------------------
+
+$dlpSafeEnvironmentName = $EnvironmentDisplayName -replace '[^a-zA-Z0-9\-]', '-'
+$dlpPolicyName = "DLP-$dlpSafeEnvironmentName"
+
 New-EnvironmentDlpPolicy `
     -EnvironmentId $environmentId `
     -PolicyDisplayName $dlpPolicyName
 
-$environmentGroupId = New-OrGet-EnvironmentGroup -GroupDisplayName $EnvironmentGroupName
+# ------------------------------------------------------------
+# Create or retrieve Environment Group
+# ------------------------------------------------------------
+
+$environmentGroupId = New-OrGet-EnvironmentGroup `
+    -GroupDisplayName $EnvironmentGroupName
+
+if (:IsNullOrWhiteSpace($environmentGroupId)) {
+    throw "Environment Group ID is empty. Cannot continue."
+}
+
+# ------------------------------------------------------------
+# Add environment to Environment Group
+# ------------------------------------------------------------
 
 Add-EnvironmentToEnvironmentGroup `
     -GroupId $environmentGroupId `
     -EnvironmentId $environmentId
 
-Write-Host "Automation completed successfully."
-Write-Host "Environment Name: $EnvironmentDisplayName"
+# ------------------------------------------------------------
+# Done
+# ------------------------------------------------------------
+
+Write-Host "Power Platform automation completed successfully."
+Write-Host "Environment Display Name: $EnvironmentDisplayName"
 Write-Host "Environment ID: $environmentId"
+Write-Host "Security Group Name: $securityGroupDisplayName"
 Write-Host "Security Group ID: $securityGroupId"
 Write-Host "DLP Policy Name: $dlpPolicyName"
+Write-Host "Environment Group Name: $EnvironmentGroupName"
 Write-Host "Environment Group ID: $environmentGroupId"
